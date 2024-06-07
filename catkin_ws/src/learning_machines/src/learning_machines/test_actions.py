@@ -1,4 +1,5 @@
 import cv2
+import numpy as np
 
 from data_files import FIGRURES_DIR
 from robobo_interface import (
@@ -95,18 +96,15 @@ def move_until_obstacle(rob: IRobobo):
             while True:
                 # Start moving forward for a short duration to continually check sensors
                 rob.move(30, 30, 250)
-                #rob.move(75, 75, 1000)
 
                 # Read IR sensor data
                 ir_data = rob.read_irs()
                 print("IR sensor data:", ir_data)
 
                 # Check if any of the IR sensors detect an obstacle
-                #if any(sensor > 150 for sensor in ir_data):
-                #if ir_data[4] > 5:
-                if ir_data[4] > 250:
+                if ir_data[4] > 200:
                     # Stop the robot
-                    rob.move(0, 0, 0)
+                    rob.stop_wheels()
                     rob.talk("Obstacle detected")
                     break
 
@@ -116,7 +114,6 @@ def move_until_obstacle(rob: IRobobo):
             rob.reset_wheels()
             while True:
                 rob.move(-30, -30, 250)
-                #rob.move(-75, -75, 1000)
 
                 # Read IR sensor data
                 ir_data = rob.read_irs()
@@ -126,11 +123,9 @@ def move_until_obstacle(rob: IRobobo):
                 print(f'Wheel data: {wheel_data}')
 
                 # Check if any of the IR sensors detect an obstacle
-                #if any(sensor > 150 for sensor in ir_data):
-                #if ir_data[6] > 10:
-                if ir_data[6] > 250:
+                if ir_data[6] > 200:
                     # Stop the robot
-                    rob.move(0, 0, 0)
+                    rob.stop_wheels()
                     rob.talk("Another obstacle detected")
                     break
                 rob.sleep(0.05)
@@ -150,7 +145,7 @@ def move_until_obstacle(rob: IRobobo):
                 
                 if wheel_data.wheel_pos_l - 50 > wheel_l and wheel_data.wheel_pos_r - 50 > wheel_r:
                     # Stop the robot
-                    rob.move(0, 0, 0)
+                    rob.stop_wheels()
                     rob.talk("Reached center")
                     break
 
@@ -158,26 +153,42 @@ def move_until_obstacle(rob: IRobobo):
 
             print(f'Center dist: {wheel_l}, {wheel_r}')
             
-        # find_middle()
+        find_middle()
         rob.talk("Turning left")
         # Turn left
-        starting_angle = rob.read_orientation().yaw 
+        rob.sleep(0.1)
+        starting_angle = calc_base_angle(rob.read_orientation().yaw) 
         print(f'Starting angle: {starting_angle}')
-        rob.move(-2, 2, 100000)
+        rob.move(-2, 2, 10000)
+        prev_yaw = 0
+
         while True:
-            yaw_angle = rob.read_orientation().yaw 
-            print(f'Angle: {yaw_angle}')
-            if yaw_angle - starting_angle >= 89:
-                rob.move(0,0,0)
+            yaw_angle = calc_base_angle(rob.read_orientation().yaw, starting_angle)
+            if yaw_angle != prev_yaw:
+                prev_yaw = yaw_angle
+                print(f'Angle: {yaw_angle}')
+            if abs(yaw_angle) >= 89:
                 print(f'Final angle: {yaw_angle}')
+                rob.stop_wheels()
                 break
-        #rob.move(0, 10, 3800)
-        #find_middle()
+        find_middle()
 
     except KeyboardInterrupt:
         rob.move(0, 0, 0)
 
-     
+def calc_base_angle(angle: float, base_angle = 0.0):
+    currentAngle =  angle + 180 - base_angle 
+    if currentAngle < 0: currentAngle += 360
+    currentAngle -= 180
+    if currentAngle > 180: currentAngle -= 360
+    if currentAngle < -180: currentAngle += 360
+    return currentAngle
+
+def how_near_is_angle(start_angle, current_angle):
+    start_rad = np.deg2rad(start_angle)
+    current_rad = np.deg2rad(current_angle)
+    np.sin(current_rad - start_rad)
+    
 
 def run_task0_actions(rob: IRobobo):
     if isinstance(rob, SimulationRobobo):

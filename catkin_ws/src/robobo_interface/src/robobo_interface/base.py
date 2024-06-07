@@ -81,6 +81,13 @@ class IRobobo(ABC):
             functools.partial(self.move, left_speed, right_speed, millis)
         )
 
+    def stop_wheels(self) -> int:
+         """Stops the robot's wheels
+         returns:
+             the blockid
+         """
+         return self.move(0, 0, 1000)
+
     @abstractmethod
     def reset_wheels(self) -> None:
         """Allows to reset the wheel encoder positions to 0.
