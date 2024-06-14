@@ -2,11 +2,12 @@
 import sys
 
 from robobo_interface import SimulationRobobo, HardwareRobobo
-from learning_machines import run_all_actions, run_task0_actions
+from learning_machines import run_all_actions, run_task0_actions, run_task1_actions
 
 
 if __name__ == "__main__":
     # You can do better argument parsing than this!
+    print(sys.argv)
     if len(sys.argv) < 2:
         raise ValueError(
             """To run, we need to know if we are running on hardware of simulation
@@ -18,5 +19,12 @@ if __name__ == "__main__":
         rob = SimulationRobobo()
     else:
         raise ValueError(f"{sys.argv[1]} is not a valid argument.")
+    
+    print(sys.argv[2])
 
-    run_all_actions(rob)
+    if len(sys.argv) >= 3 and sys.argv[2] == "--train":
+        run_all_actions(rob)
+    elif len(sys.argv) >= 3 and sys.argv[2] == "--test":
+        run_task1_actions(rob)
+
+    # run_all_actions(rob)

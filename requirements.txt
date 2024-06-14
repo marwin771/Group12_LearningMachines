@@ -3,3 +3,5 @@ cbor2
 coppeliasim-zmqremoteapi-client
 numpy~=1.24
 opencv-python~=4.8
+seaborn
+matplotlib

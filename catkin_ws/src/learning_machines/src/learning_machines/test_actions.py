@@ -88,7 +88,7 @@ class RobotNNController:
         
         self.epsilon_start = 0.9
         self.epsilon_end = 0.05
-        self.epsilon_decay = 1000 # 0.995
+        self.epsilon_decay = 1000 
 
 
     def select_action(self, state: torch.Tensor) -> torch.Tensor:
@@ -99,7 +99,7 @@ class RobotNNController:
             with torch.no_grad():
                 return self.policy_net(state)
         else:
-            return torch.tensor([[random.uniform(-100, 100), random.uniform(-100, 100)]], device=device, dtype=torch.float)
+            return torch.tensor([[random.uniform(-100, 100), random.uniform(-100, 100)]], device=device, dtype=torch.float64)
 
     def update_target(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -198,14 +198,17 @@ def get_reward(rob, starting_pos, total_left, total_right, left_speed, right_spe
     
     return torch.tensor([reward], device=device)
 
-def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episodes = 30, load_previous=False):
+def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episodes = 30, load_previous=False, moves=20):
     highest_reward = -float('inf')
     model_path = FIGRURES_DIR  / 'top.model'
 
     total_left, total_right = 0.0, 0.0
 
     global iterations_since_last_collision
-    iterations_since_last_collision = 1
+    global sensor_readings
+    sensor_readings = []
+    global rewards
+    rewards = []
 
     if load_previous and os.path.exists(model_path):
         controller.policy_net.load_state_dict(torch.load(model_path))
@@ -213,6 +216,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         print("Loaded saved model.")
 
     for episode in range(num_episodes):
+        iterations_since_last_collision = 1
         print(f'Started Episode: {episode}')
         
         # Start the simulation
@@ -223,11 +227,12 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         total_reward = 0
 
         for t in count():
+            sensor_readings.append(rob.read_irs())
             speeds = controller.select_action(state)
             left_speed, right_speed = speeds[0, 0].item(), speeds[0, 1].item()
             move_time = 100
             rob.reset_wheels()
-            rob.move_blocking(left_speed, right_speed, move_time)
+            rob.move_blocking(int(left_speed), int(right_speed), move_time)
             next_state = irs_to_state(rob)
             wheels = rob.read_wheels()
 
@@ -242,23 +247,111 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
 
             controller.optimize_model()
 
-            if t > 20:
+            if t > moves:
                 rob.stop_simulation()
                 break
-
+        rewards.append(total_reward)
         controller.update_target()
+        print(f"Episode: {episode}, Total Reward: {total_reward}")
         if total_reward > highest_reward:
             highest_reward = total_reward
             torch.save(controller.policy_net.state_dict(), model_path)
             print(f"Saved best model with highest reward: {highest_reward}")
 
 
+def clamp(n, smallest, largest): 
+    if n < 0:
+        return max(n, smallest)
+    return min(n, largest)
+
+def run_model(rob: IRobobo, controller: RobotNNController):
+    # load the model
+    model_path = FIGRURES_DIR  / 'top_hardware.model'
+    controller.policy_net.load_state_dict(torch.load(model_path))
+    controller.target_net.load_state_dict(controller.policy_net.state_dict())
+    controller.policy_net.eval()
+
+    # Start the simulation
+    if isinstance(rob, SimulationRobobo):
+        rob.play_simulation()
+
+    state = irs_to_state(rob)
+    
+    collisions = 0
+    still_colliding = False
+
+    while True:
+        speeds = controller.select_action(state)
+        left_speed, right_speed = speeds[0, 0].item(), speeds[0, 1].item()
+        print(f"Speeds: {left_speed}, {right_speed}")
+        if isinstance(rob, SimulationRobobo):
+            move_time = 100
+        else:
+            move_time = 500
+        rob.reset_wheels()
+        
+        rob.move_blocking(clamp(int(left_speed), -100, 100), clamp(int(right_speed), -100, 100), move_time)
+        next_state = irs_to_state(rob)
+        state = next_state
+
+        if rob.read_irs()[0] > 250 and not still_colliding:
+            collisions += 1
+            still_colliding = True
+            print(f"Collisions: {collisions}")
+        elif rob.read_irs()[0] < 250:
+            still_colliding = False
+
+        # Exit on collision
+        # if collisions > 9:
+        #     break
+
+    if isinstance(rob, SimulationRobobo):
+        rob.stop_simulation()
+
+
 # Initialize the agent and run the simulation
 # n_observations = 8 IR sensors
 controller = RobotNNController(n_observations=8, memory_capacity=10000, batch_size=64, gamma=0.99, lr=1e-3)
 
+def generate_plots():
+    global sensor_readings
+    global rewards
+    import matplotlib.pyplot as plt
+    import numpy as np
+    import seaborn as sns
+
+    sns.set_theme()
+    sns.set_style("whitegrid")
+    sns.set_context("notebook", font_scale=1.5, rc={"lines.linewidth": 2.5})
+
+    sensor_readings = np.array(sensor_readings)
+    fig, ax = plt.subplots(figsize=(12, 8))
+    for i in range(8):
+        ax.plot(sensor_readings[:, i], label=f"IR {i+1}")
+
+    ax.legend()
+    ax.set_xlabel("Time")
+    ax.set_ylabel("IR Sensor Value")
+    ax.set_title("IR Sensor Readings Over Time")
+    
+    # save the figure to the figures directory
+    plt.savefig(FIGRURES_DIR / 'sensor_readings_training.png')
+
+    # Plot the rewards
+    rewards = np.array(rewards)
+    fig, ax = plt.subplots(figsize=(12, 8))
+    ax.plot(rewards)
+    ax.set_xlabel("Time")
+    ax.set_ylabel("Reward")
+    ax.set_title("Rewards Over Time")
+    plt.savefig(FIGRURES_DIR / 'rewards_training.png')
+
 def run_all_actions(rob):
-    run_training(rob, controller, num_episodes=30)
+    run_training(rob, controller, num_episodes=30, load_previous=False, moves=20)
+    generate_plots()
+
+def run_task1_actions(rob):
+    run_model(rob, controller)
 
 def run_task0_actions(rob):
     print('Task 0 actions')
