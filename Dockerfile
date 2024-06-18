@@ -11,6 +11,8 @@ RUN apt-get update -y && apt-get install ffmpeg libsm6 libxext6 ros-noetic-openc
 # The python3 interpreter is already being shilled by ros:noetic, so no need for a venv.
 COPY ./requirements.txt /requirements.txt
 RUN python3 -m pip install -r /requirements.txt && rm /requirements.txt
+RUN python3 -m pip install networkx==3.1
+RUN python3 -m pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cpu
 
 # Build the CPP stuff in a seperate stage, such that we can take advantage of Docker's cashing mechanics.
 # (As long as you don't touch the `robobo_msgs` package, this stage is going to be completely cached.)
