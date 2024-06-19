@@ -156,16 +156,60 @@ class RobotNNController:
 
 def get_camera_image(rob: IRobobo) -> torch.Tensor:
     image = rob.get_camera_image()
+    
+    res = 192 # I'm too lazy to write a good split that equally splits for non-divisor numbers, so for the time being I need this to be divisible by 6
+    # res = 96
 
-    image = cv2.resize(image, (128, 128))
-    image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    return torch.tensor(image_gray, device=device, dtype=torch.float)
+    image = cv2.resize(image, (res, res))
+    # image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_before_movement, move_time):
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(hsv, (36,25,25), (70,255,255))
 
+    image[mask > 0] = [255,255,255] # or [1,1,1] but then you can't view the result, so we'll take this extra step here
+    image[mask <= 0] = [0,0,0]
+
+    green_binary = image[:, :, 0]
+    green_binary = image[:, :, None]
+    green_binary /= 255
+
+    return torch.tensor(green_binary, device=device, dtype=torch.float)
+
+def split_data(rows, cols, data): # please use something that is divisible by our dimensions (natural powers of two), otherwise it's gonna cut off the end
+    
+    steps_row = len(data) // rows
+    steps_col = len(data[0]) // cols
+    buffer = []
+    for row in range(rows):
+        buffer_row = []
+        for col in range(cols):
+            buffer_row.append(data[row * steps_row : (row + 1) * steps_row, col * steps_col : (col + 1) * steps_col])
+        buffer.append(buffer_row)
+    
+    '''
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    ------------------|------------------
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    ------------------|------------------
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
+    '''
+
+    return buffer
+
+def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_before_movement, image_before_movement, move_time):
+
+    global food_consumed
+    # rob_after_movement.nr_food_collected()
     # hypers
     collision_treshold = 150
     distance_between_wheels = 10 # cm
+    
 
 
     # math (these are calculated when we're not going backwards, it might work for backwards movement but I'm too tired to think about it, so only use it with forward movement)
@@ -256,8 +300,12 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         rob.play_simulation()
 
         state = irs_to_state(rob)
+        camera_state = get_camera_image(rob)
         starting_pos = rob.get_position()
         total_reward = 0
+
+        global food_consumed
+        food_consumed = 0
 
         for t in count():
             # state here is what we see before moving
@@ -268,17 +316,19 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
             rob.reset_wheels()
             rob.move_blocking(int(left_speed), int(right_speed), move_time) # execute movement
             next_state = irs_to_state(rob) # what we see after moving
+            next_camera_state = get_camera_image(rob)
             wheels = rob.read_wheels()
 
             total_left += wheels.wheel_pos_l
             total_right += wheels.wheel_pos_r
             
             # reward gets rob (after moving), left_speed and right_speed (of the last movement),
-            reward = get_reward(rob, starting_pos, left_speed, right_speed, state, move_time)
+            reward = get_reward(rob, starting_pos, left_speed, right_speed, state, camera_state, move_time)
             total_reward += reward.item()
 
             controller.push(state, speeds, next_state, reward)
             state = next_state
+            camera_state = next_camera_state
 
             controller.optimize_model()
 
@@ -382,6 +432,7 @@ def generate_plots():
     plt.savefig(FIGRURES_DIR / 'rewards_training.png')
 
 def run_all_actions(rob):
+    rob.moveTiltTo(90, 100, True)
     run_training(rob, controller, num_episodes=30, load_previous=False, moves=20)
     generate_plots()
 
