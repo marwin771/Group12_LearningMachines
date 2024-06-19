@@ -8,6 +8,7 @@ import numpy as np
 import os
 from itertools import count
 import math
+import cv2
 
 from typing import Literal
 
@@ -153,48 +154,80 @@ class RobotNNController:
         # torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.optimizer.step()
 
+def get_camera_image(rob: IRobobo) -> torch.Tensor:
+    image = rob.get_camera_image()
 
-def get_reward(rob, starting_pos, total_left, total_right, left_speed, right_speed, move_time):
-    global iterations_since_last_collision
-    reward = 0
-    irs = rob.read_irs()
+    image = cv2.resize(image, (128, 128))
+    image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    return torch.tensor(image_gray, device=device, dtype=torch.float)
 
-    wheels = rob.read_wheels()
+def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_before_movement, move_time):
+
+    # hypers
+    collision_treshold = 150
+    distance_between_wheels = 10 # cm
+
+
+    # math (these are calculated when we're not going backwards, it might work for backwards movement but I'm too tired to think about it, so only use it with forward movement)
+    radius = 0 if left_speed == right_speed else ((left_speed + right_speed) * distance_between_wheels) / (2 * np.abs(left_speed - right_speed))
+    angular_velocity = np.abs(left_speed - right_speed) / (distance_between_wheels / 2) 
+    angle_rad = angular_velocity * move_time / 1000 # in seconds
+    turn = "left" if left_speed < right_speed else ("right" if right_speed < left_speed else "forward")
+    turn_angle = angle_rad / 2
+
+    irs_after_movement = rob_after_movement.read_irs()
+    
+    current_pos = rob_after_movement.get_position()
+    wheels = rob_after_movement.read_wheels()
+
     left = wheels.wheel_pos_l
     right = wheels.wheel_pos_r
-    current_pos = rob.get_position()
+    
+    front = np.array([8,3,5,4,6])
+    back = np.array([1,7,2])
+
     distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([starting_pos.x, starting_pos.y]))
 
-    def penalty(left, right, irs):
-        global iterations_since_last_collision
-        iterations_since_last_collision += 1
+    reward = 0
 
-        collision_treshold = 180
+    if left * right > 0 and left > 0: # going forward
+        reward += 500
+        # if (there was a non-wall object in front of us and we didn't turn (/ we went towards it))
+        # alternatively: there was a non-wall object in front of us AND [there still is a non-wall object OR we bumped into it to collect]
+            # increase reward
+            # increase reward further if we bumped into it
+            # if we didn't, increase reward further if an object in front of us is now in close proximity (so not a wall)
+        # elif (there was an object at the angle where we turned)
+            # increase reward for good turn:  in respect to how good the turn was / how in-front-of-us the object is
+            # maybe increase reward for how in 
+        # if (there wasn't anything in our proximity)
+            # increase reward by how far it moved (so how fast the wheels moved)
 
-        collision_penalty = 1000
-        reverse_penalty = 150
 
-        buffer = 0
-        # ring = [1,2,3,5,7,5,3,2,1]
-        if left * right > 0: # if not turning in place
-            for i in ([8,3,5,4,6] if left > 0 else [1,7,2]): # if front then front otherwise back
-                if irs[i - 1] > collision_treshold: # if collision
-                    iterations_since_last_collision = 0
-                    return collision_penalty
-                buffer += irs[i - 1]
-        else: # if turning in place
-            for i in range(8):
-                if irs[i] > collision_treshold:
-                    iterations_since_last_collision = 0
-                    return collision_penalty
-                buffer += 2 * irs[i]
+        # if irs_before_movement[front[]]
+
+    
+
+    # def penalty(left, right, irs):
+
+    #     buffer = 0
+    #     # ring = [1,2,3,5,7,5,3,2,1]
+    #     if left * right > 0: # if not turning in place
+    #         for i in ([8,3,5,4,6] if left > 0 else [1,7,2]): # if front then front otherwise back
+    #             if irs[i - 1] > collision_treshold: # if collision
+    #                 return collision_penalty
+    #             buffer += irs[i - 1]
+    #     else: # if turning in place
+    #         for i in range(8):
+    #             if irs[i] > collision_treshold:
+    #                 return collision_penalty
+    #             buffer += 2 * irs[i]
         
-        buffer += reverse_penalty if left < 0 and right < 0 else 0
-        return buffer
+    #     buffer += reverse_penalty if left < 0 and right < 0 else 0
+    #     return buffer
 
-    proximity_penalty = penalty(left_speed, right_speed, irs)
     consecutive_mult = 2 * np.arctan(5*iterations_since_last_collision/2) / np.pi + 1
-    reward = distance * 5000 * consecutive_mult - proximity_penalty
+
     
     return torch.tensor([reward], device=device)
 
@@ -227,19 +260,21 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         total_reward = 0
 
         for t in count():
+            # state here is what we see before moving
             sensor_readings.append(rob.read_irs())
             speeds = controller.select_action(state)
-            left_speed, right_speed = speeds[0, 0].item(), speeds[0, 1].item()
+            left_speed, right_speed = speeds[0, 0].item(), speeds[0, 1].item() # choose a movement
             move_time = 100
             rob.reset_wheels()
-            rob.move_blocking(int(left_speed), int(right_speed), move_time)
-            next_state = irs_to_state(rob)
+            rob.move_blocking(int(left_speed), int(right_speed), move_time) # execute movement
+            next_state = irs_to_state(rob) # what we see after moving
             wheels = rob.read_wheels()
 
             total_left += wheels.wheel_pos_l
             total_right += wheels.wheel_pos_r
-
-            reward = get_reward(rob, starting_pos, total_left, total_right, left_speed, right_speed, move_time)
+            
+            # reward gets rob (after moving), left_speed and right_speed (of the last movement),
+            reward = get_reward(rob, starting_pos, left_speed, right_speed, state, move_time)
             total_reward += reward.item()
 
             controller.push(state, speeds, next_state, reward)
