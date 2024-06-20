@@ -209,15 +209,7 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
 
     # hypers
     collision_treshold = 150
-    distance_between_wheels = 10 # cm
-
-    # point -> reward
-    # see green in front (middle col but not only lower) and goes front -> reward
-    # sees green in lower front (middle col but only lower) and floors it -> reward
-    # doesnt see green in front but sees green in either side and turns towards
-    
-    
-    
+    distance_between_wheels = 10 # cm    
 
     # math (these are calculated when we're not going backwards, it might work for backwards movement but I'm too tired to think about it, so only use it with forward movement)
     radius = 0 if left_speed == right_speed else ((left_speed + right_speed) * distance_between_wheels) / (2 * np.abs(left_speed - right_speed))
@@ -226,8 +218,8 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
     turn = "left" if left_speed < right_speed else ("right" if right_speed < left_speed else "forward")
     turn_angle = angle_rad / 2
 
-    irs_after_movement = rob_after_movement.read_irs()
-    
+    irs_after_movement = irs_to_state(rob_after_movement)
+    # print(irs_after_movement)
     current_pos = rob_after_movement.get_position()
     wheels = rob_after_movement.read_wheels()
 
@@ -247,51 +239,75 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
     reward = 0
 
     if food_consumed < rob_after_movement.nr_food_collected():
-        reward += 4500 * (rob_after_movement.nr_food_collected() - food_consumed)
+        reward += 4500 * (rob_after_movement.nr_food_collected() - food_consumed) * (0 if left_speed < 0 and right_speed < 0 else 1)
         food_consumed = rob_after_movement.nr_food_collected()
-
-
     
 
     def how_forward_coefficient(left, right):
         return 1/(1/6 * np.abs(left - right) + 1) + 1
+        
+    
+    # if np.sum(three_by_three[:, 1]) / (all_pixels / 3) < 0.025: # if empty middle
+    #     if left_speed < 0 and right_speed > 0: # go left
+    #         reward += 500
+    #     else:
+    #         reward -= 200
+    # else: # green middle
+    #     if left_speed > 0 and right_speed > 0: # go forward
+    #         reward += 500 * how_forward_coefficient(left_speed, right_speed)
+    #     else:
+    #         reward -= 200
+    # if left_speed > 0 or right_speed > 0:
+    #     reward += 100
+    # else:
+    #     reward -= 200
+    # reward += np.sum(three_by_three)/res
+
+    if np.sum(three_by_three[:, 1]) / (all_pixels / 3) < 0.05: # if empty middle
+        reward -= 1000 if left_speed > 0 and right_speed > 0 else 0
+        if sum(irs_before_movement[0, front - 1]) > 3 * collision_treshold: # if facing the wall
+            reward += 1000 if right_speed > 0 and left_speed < 0 else 0 # reward left turn specifically
+            reward -= 200 if right_speed < 0 and left_speed > 0 else 0 # punish right turn specifically
+        else: # not facing a wall
+            reward += 0 if left_speed * right_speed < 0 else 500 # reward full turn
+            if np.sum(one_by_two[0, 0]) / (all_pixels / 2) > 0.01 or np.sum(one_by_two[0, 1]) / (all_pixels / 2) > 0.01: # if there is a specific side we can turn towards
+                reward += 500 if np.sum(one_by_two[0, 0]) > np.sum(one_by_two[0, 1]) and left_speed < right_speed else 0 # reward successful left turn
+                reward += 500 if np.sum(one_by_two[0, 0]) < np.sum(one_by_two[0, 1]) and left_speed > right_speed else 0 # reward successful right turn
+    else: # if green middle
+        reward += 0 if left_speed <= 0 or right_speed <= 0 else 500 * how_forward_coefficient(left_speed, right_speed) # reward forward motion
+    
+    # reward += np.sum(three_by_three)/res
+    # print(np.sum(three_by_three)/res)
 
 
-    # here comes the ugly if tree because I'm not gonna go over the logic to optimise the amount of lines written at 3:23 AM. For more see: https://en.wikipedia.org/wiki/Gordian_Knot
-    if right_speed > 0 and left_speed > 0: # going forward in any way
-        if np.sum(three_by_three[:, 1]) / (all_pixels / 3) > 0.05: # the middle column has considerable green
-            reward += 500 * how_forward_coefficient(left_speed, right_speed)
-        if np.sum(three_by_three[2, 1]) > 0 and left_speed > 50 and right_speed > 50: # the bottom middle has any green in it
-            reward += 500
-    elif right_speed * left_speed <= 0 and np.sum(three_by_three[:, 1]) / (all_pixels / 3) < 0.05: # turning when there is nothing in front of us
-        reward += 200
-        if np.sum(one_by_two[0, 0]) / (all_pixels / 2) < 0.01 and np.sum(one_by_two[0, 1]) / (all_pixels / 2) < 0.01: # there is less than considerable green to both the left and the right
-            reward += 300
-        elif np.sum(one_by_two[0, 0]) > np.sum(one_by_two[0, 1]): # we have considerable green somewhere and more on the left
-            if left_speed < right_speed: # and we turn left
-                reward += 400
-            # else:
-            #     reward -= 200
-        else: # considerable green but more to the right
-            if right_speed < left_speed: # and we turn right
-                reward += 400
-    elif right_speed < 0 and left_speed < 0: # going in reverse
-        if np.sum(three_by_three[:,:]) <= 10 and sum(irs_before_movement[0, front - 1]) > 3 * collision_treshold: # nothing green in front and we most likely hit something
-            reward += 500 * how_forward_coefficient(left_speed, right_speed)
-        else:
-            reward -= 200
 
 
-        # if (there was a non-wall object in front of us and we didn't turn (/ we went towards it))
-        # alternatively: there was a non-wall object in front of us AND [there still is a non-wall object OR we bumped into it to collect]
-            # increase reward
-            # increase reward further if we bumped into it
-            # if we didn't, increase reward further if an object in front of us is now in close proximity (so not a wall)
-        # elif (there was an object at the angle where we turned)
-            # increase reward for good turn:  in respect to how good the turn was / how in-front-of-us the object is
-            # maybe increase reward for how in 
-        # if (there wasn't anything in our proximity)
-            # increase reward by how far it moved (so how fast the wheels moved)
+    # # here comes the ugly if tree because I'm not gonna go over the logic to optimise the amount of lines written at 3:23 AM. For more see: https://en.wikipedia.org/wiki/Gordian_Knot
+    # if right_speed > 0 and left_speed > 0: # going forward in any way
+    #     if np.sum(three_by_three[:, 1]) / (all_pixels / 3) > 0.05: # the middle column has considerable green
+    #         reward += 500 * how_forward_coefficient(left_speed, right_speed)
+    #     if np.sum(three_by_three[2, 1]) > 0 and left_speed > 50 and right_speed > 50: # the bottom middle has any green in it
+    #         reward += 500
+    # elif right_speed * left_speed <= 0 and np.sum(three_by_three[:, 1]) / (all_pixels / 3) < 0.05: # turning when there is nothing in front of us
+    #     reward += 300
+    #     if np.sum(one_by_two[0, 0]) / (all_pixels / 2) < 0.01 and np.sum(one_by_two[0, 1]) / (all_pixels / 2) < 0.01: # there is less than considerable green to both the left and the right
+    #         reward += 600 - sum(irs_after_movement[0, front - 1])
+    #     elif np.sum(one_by_two[0, 0]) > np.sum(one_by_two[0, 1]): # we have considerable green somewhere and more on the left
+    #         if left_speed < right_speed: # and we turn left
+    #             reward += 400
+    #         # else:
+    #         #     reward -= 200
+    #     else: # considerable green but more to the right
+    #         if right_speed < left_speed: # and we turn right
+    #             reward += 400
+    # elif right_speed < 0 and left_speed < 0: # going in reverse
+    #     if np.sum(three_by_three[:,:]) <= 10 and sum(irs_before_movement[0, front - 1]) > 3 * collision_treshold: # nothing green in front and we most likely hit something
+    #         reward += 700 * how_forward_coefficient(left_speed, right_speed)
+    #     else:
+    #         reward -= 200
+
+
+
     
     return torch.tensor([reward], device=device)
 
@@ -354,7 +370,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
 
             controller.optimize_model()
 
-            if t > moves:
+            if t > moves + (episode // 5) * 5 :
                 rob.stop_simulation()
                 break
         rewards.append(total_reward)
