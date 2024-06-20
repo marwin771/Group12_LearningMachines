@@ -9,6 +9,7 @@ import os
 from itertools import count
 import math
 import cv2
+import datetime
 
 from typing import Literal
 
@@ -184,7 +185,7 @@ def split_data(rows, cols, data): # please use something that is divisible by ou
         buffer_row = []
         for col in range(cols):
             buffer_row.append(data[row * steps_row : (row + 1) * steps_row, col * steps_col : (col + 1) * steps_col])
-        buffer.append(buffer_row)
+        buffer.append(np.array(buffer_row))
     
     '''
     1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
@@ -200,17 +201,23 @@ def split_data(rows, cols, data): # please use something that is divisible by ou
     1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
     '''
 
-    return buffer
+    return np.array(buffer)
 
 def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_before_movement, image_before_movement, move_time):
 
     global food_consumed
-    # rob_after_movement.nr_food_collected()
+
     # hypers
     collision_treshold = 150
     distance_between_wheels = 10 # cm
-    
 
+    # point -> reward
+    # see green in front (middle col but not only lower) and goes front -> reward
+    # sees green in lower front (middle col but only lower) and floors it -> reward
+    # doesnt see green in front but sees green in either side and turns towards
+    
+    
+    
 
     # math (these are calculated when we're not going backwards, it might work for backwards movement but I'm too tired to think about it, so only use it with forward movement)
     radius = 0 if left_speed == right_speed else ((left_speed + right_speed) * distance_between_wheels) / (2 * np.abs(left_speed - right_speed))
@@ -232,10 +239,54 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
 
     distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([starting_pos.x, starting_pos.y]))
 
+    one_by_two = split_data(1, 2, image_before_movement)
+    three_by_three = split_data(3, 3, image_before_movement)
+    res = 192
+    all_pixels = res * res
+
     reward = 0
 
-    if left * right > 0 and left > 0: # going forward
-        reward += 500
+    if food_consumed < rob_after_movement.nr_food_collected():
+        reward += 2000 * (rob_after_movement.nr_food_collected() - food_consumed)
+        food_consumed = rob_after_movement.nr_food_collected()
+
+
+    def rec_sum_parts(matrix):
+        return sum(sum(sum(matrix)))
+
+    def rec_sum_one(matrix):
+        return sum(sum(matrix))
+    
+
+    def how_forward_coefficient(left, right):
+        return 1/(1/6 * np.abs(left - right) + 1) + 1
+
+
+    # here comes the ugly if tree because I'm not gonna go over the logic to optimise the amount of lines written at 3:23 AM. For more see: https://en.wikipedia.org/wiki/Gordian_Knot
+    if right_speed > 0 and left_speed > 0: # going forward in any way
+        if rec_sum_parts(three_by_three[:, 1]) / (all_pixels / 3) > 0.05: # the middle column has considerable green
+            reward += 500 * how_forward_coefficient(left_speed, right_speed)
+        if rec_sum_one(three_by_three[2, 1]) > 0 and left_speed > 30 and right_speed > 30: # the bottom middle has any green in it
+            reward += 500
+    elif right_speed * left_speed <= 0 and rec_sum_parts(three_by_three[:, 1]) / (all_pixels / 3) < 0.05: # turning when there is nothing in front of us
+        reward += 200
+        if rec_sum_one(one_by_two[0, 0]) / (all_pixels / 2) < 0.01 and rec_sum_one(one_by_two[0, 1]) / (all_pixels / 2) < 0.01: # there is less than considerable green to both the left and the right
+            reward += 300
+        elif rec_sum_parts(one_by_two[0, 0]) > rec_sum_one(one_by_two[0, 1]): # we have considerable green somewhere and more on the left
+            if left_speed < right_speed: # and we turn left
+                reward += 400
+            # else:
+            #     reward -= 200
+        else: # considerable green but more to the right
+            if right_speed < left_speed: # and we turn right
+                reward += 400
+    elif right_speed < 0 and left_speed < 0: # going in reverse
+        if rec_sum_parts(three_by_three[:,:]) <= 10 and sum(irs_before_movement[front]) > collision_treshold: # nothing green in front and we most likely hit something
+            reward += 500
+        else:
+            reward -= 200
+
+
         # if (there was a non-wall object in front of us and we didn't turn (/ we went towards it))
         # alternatively: there was a non-wall object in front of us AND [there still is a non-wall object OR we bumped into it to collect]
             # increase reward
@@ -246,38 +297,12 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
             # maybe increase reward for how in 
         # if (there wasn't anything in our proximity)
             # increase reward by how far it moved (so how fast the wheels moved)
-
-
-        # if irs_before_movement[front[]]
-
-    
-
-    # def penalty(left, right, irs):
-
-    #     buffer = 0
-    #     # ring = [1,2,3,5,7,5,3,2,1]
-    #     if left * right > 0: # if not turning in place
-    #         for i in ([8,3,5,4,6] if left > 0 else [1,7,2]): # if front then front otherwise back
-    #             if irs[i - 1] > collision_treshold: # if collision
-    #                 return collision_penalty
-    #             buffer += irs[i - 1]
-    #     else: # if turning in place
-    #         for i in range(8):
-    #             if irs[i] > collision_treshold:
-    #                 return collision_penalty
-    #             buffer += 2 * irs[i]
-        
-    #     buffer += reverse_penalty if left < 0 and right < 0 else 0
-    #     return buffer
-
-    consecutive_mult = 2 * np.arctan(5*iterations_since_last_collision/2) / np.pi + 1
-
     
     return torch.tensor([reward], device=device)
 
 def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episodes = 30, load_previous=False, moves=20):
     highest_reward = -float('inf')
-    model_path = FIGRURES_DIR  / 'top.model'
+    model_path = FIGRURES_DIR 
 
     total_left, total_right = 0.0, 0.0
 
@@ -293,11 +318,13 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         print("Loaded saved model.")
 
     for episode in range(num_episodes):
-        iterations_since_last_collision = 1
+        # iterations_since_last_collision = 1
+
         print(f'Started Episode: {episode}')
         
         # Start the simulation
         rob.play_simulation()
+        rob.sleep(0.5)
 
         state = irs_to_state(rob)
         camera_state = get_camera_image(rob)
@@ -340,7 +367,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         print(f"Episode: {episode}, Total Reward: {total_reward}")
         if total_reward > highest_reward:
             highest_reward = total_reward
-            torch.save(controller.policy_net.state_dict(), model_path)
+            torch.save(controller.policy_net.state_dict(), model_path / f"{datetime.datetime.now()}")
             print(f"Saved best model with highest reward: {highest_reward}")
 
 
@@ -432,7 +459,9 @@ def generate_plots():
     plt.savefig(FIGRURES_DIR / 'rewards_training.png')
 
 def run_all_actions(rob):
-    rob.moveTiltTo(90, 100, True)
+    # rob.moveTiltTo(100, 100, True)
+    # rob.sleep(5)
+    # rob.startCamera()
     run_training(rob, controller, num_episodes=30, load_previous=False, moves=20)
     generate_plots()
 
