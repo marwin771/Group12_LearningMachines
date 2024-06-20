@@ -101,7 +101,7 @@ class RobotNNController:
             with torch.no_grad():
                 return self.policy_net(state)
         else:
-            return torch.tensor([[random.uniform(-100, 100), random.uniform(-100, 100)]], device=device, dtype=torch.float64)
+            return torch.tensor([[random.uniform(-50, 100), random.uniform(-50, 100)]], device=device, dtype=torch.float64)
 
     def update_target(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -156,7 +156,7 @@ class RobotNNController:
         self.optimizer.step()
 
 def get_camera_image(rob: IRobobo) -> torch.Tensor:
-    image = rob.get_camera_image()
+    image = rob.get_image_front()
     
     res = 192 # I'm too lazy to write a good split that equally splits for non-divisor numbers, so for the time being I need this to be divisible by 6
     # res = 96
@@ -167,26 +167,26 @@ def get_camera_image(rob: IRobobo) -> torch.Tensor:
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
     mask = cv2.inRange(hsv, (36,25,25), (70,255,255))
 
-    image[mask > 0] = [255,255,255] # or [1,1,1] but then you can't view the result, so we'll take this extra step here
+    image[mask > 0] = [1,1,1] # or [1,1,1] but then you can't view the result, so we'll take this extra step here
     image[mask <= 0] = [0,0,0]
 
     green_binary = image[:, :, 0]
     green_binary = image[:, :, None]
-    green_binary /= 255
 
     return torch.tensor(green_binary, device=device, dtype=torch.float)
 
 def split_data(rows, cols, data): # please use something that is divisible by our dimensions (natural powers of two), otherwise it's gonna cut off the end
-    
-    steps_row = len(data) // rows
-    steps_col = len(data[0]) // cols
+    data = np.array(data)  # Ensure data is a numpy array
+    steps_row = data.shape[0] // rows
+    steps_col = data.shape[1] // cols
     buffer = []
     for row in range(rows):
         buffer_row = []
         for col in range(cols):
-            buffer_row.append(data[row * steps_row : (row + 1) * steps_row, col * steps_col : (col + 1) * steps_col])
+            slice_ = data[row * steps_row: (row + 1) * steps_row, col * steps_col: (col + 1) * steps_col]
+            buffer_row.append(slice_)
         buffer.append(np.array(buffer_row))
-    
+
     '''
     1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
     1 1 1 1 1 1 1 1 1 | 1 1 1 1 1 1 1 1 1
@@ -247,15 +247,10 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
     reward = 0
 
     if food_consumed < rob_after_movement.nr_food_collected():
-        reward += 2000 * (rob_after_movement.nr_food_collected() - food_consumed)
+        reward += 4500 * (rob_after_movement.nr_food_collected() - food_consumed)
         food_consumed = rob_after_movement.nr_food_collected()
 
 
-    def rec_sum_parts(matrix):
-        return sum(sum(sum(matrix)))
-
-    def rec_sum_one(matrix):
-        return sum(sum(matrix))
     
 
     def how_forward_coefficient(left, right):
@@ -264,15 +259,15 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
 
     # here comes the ugly if tree because I'm not gonna go over the logic to optimise the amount of lines written at 3:23 AM. For more see: https://en.wikipedia.org/wiki/Gordian_Knot
     if right_speed > 0 and left_speed > 0: # going forward in any way
-        if rec_sum_parts(three_by_three[:, 1]) / (all_pixels / 3) > 0.05: # the middle column has considerable green
+        if np.sum(three_by_three[:, 1]) / (all_pixels / 3) > 0.05: # the middle column has considerable green
             reward += 500 * how_forward_coefficient(left_speed, right_speed)
-        if rec_sum_one(three_by_three[2, 1]) > 0 and left_speed > 30 and right_speed > 30: # the bottom middle has any green in it
+        if np.sum(three_by_three[2, 1]) > 0 and left_speed > 50 and right_speed > 50: # the bottom middle has any green in it
             reward += 500
-    elif right_speed * left_speed <= 0 and rec_sum_parts(three_by_three[:, 1]) / (all_pixels / 3) < 0.05: # turning when there is nothing in front of us
+    elif right_speed * left_speed <= 0 and np.sum(three_by_three[:, 1]) / (all_pixels / 3) < 0.05: # turning when there is nothing in front of us
         reward += 200
-        if rec_sum_one(one_by_two[0, 0]) / (all_pixels / 2) < 0.01 and rec_sum_one(one_by_two[0, 1]) / (all_pixels / 2) < 0.01: # there is less than considerable green to both the left and the right
+        if np.sum(one_by_two[0, 0]) / (all_pixels / 2) < 0.01 and np.sum(one_by_two[0, 1]) / (all_pixels / 2) < 0.01: # there is less than considerable green to both the left and the right
             reward += 300
-        elif rec_sum_parts(one_by_two[0, 0]) > rec_sum_one(one_by_two[0, 1]): # we have considerable green somewhere and more on the left
+        elif np.sum(one_by_two[0, 0]) > np.sum(one_by_two[0, 1]): # we have considerable green somewhere and more on the left
             if left_speed < right_speed: # and we turn left
                 reward += 400
             # else:
@@ -281,8 +276,8 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
             if right_speed < left_speed: # and we turn right
                 reward += 400
     elif right_speed < 0 and left_speed < 0: # going in reverse
-        if rec_sum_parts(three_by_three[:,:]) <= 10 and sum(irs_before_movement[front]) > collision_treshold: # nothing green in front and we most likely hit something
-            reward += 500
+        if np.sum(three_by_three[:,:]) <= 10 and sum(irs_before_movement[0, front - 1]) > 3 * collision_treshold: # nothing green in front and we most likely hit something
+            reward += 500 * how_forward_coefficient(left_speed, right_speed)
         else:
             reward -= 200
 
@@ -462,7 +457,7 @@ def run_all_actions(rob):
     # rob.moveTiltTo(100, 100, True)
     # rob.sleep(5)
     # rob.startCamera()
-    run_training(rob, controller, num_episodes=30, load_previous=False, moves=20)
+    run_training(rob, controller, num_episodes=30, load_previous=False, moves=40)
     generate_plots()
 
 def run_task1_actions(rob):
