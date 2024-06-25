@@ -277,7 +277,7 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
         print("PICKED UP")
 
     
-    if not starting_base_food_distance == -1:
+    if not starting_base_food_distance == -1: # if we have a starting distance we can get down to defining things, supposedly if this happens food_consumed will always be > 0
         print(f"food processed: {food_consumed > 0}")
         base_food_distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([base_position.x, base_position.y]))
         base_food_progression = 1 - base_food_distance/starting_base_food_distance 
@@ -292,6 +292,18 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
         reward += np.sqrt(20 * np.sum(two_by_three) / all_pixels)
         reward += np.sqrt(8 * 3 * np.sum(two_by_three[:,1])/all_pixels) # np.sqrt(3 * 6 * np.sum(two_by_three[1,1])/all_pixels)
         reward += 1 if irs_after_movement[0,4] > 20 and sum(irs_after_movement[0, np.array([7,2,3,5])]) < 30 else 0
+
+        """
+        explanation for the last else branch because this is the part that the robot can exploit for shitton of reward without ever picking anything up:
+
+        sqrt is there to make smaller numbers curve up https://www.desmos.com/calculator/tzm2ees4k3
+        The N * sum/all is supposed to be 0 if there are no sufficient pixels, and I eyeballed N to be a theoretical maximum divisor that the red part can occupy,
+        so if the N=20 I theorise that the food will occupy at best 1/20 of the screen, and when it does, sum/all will be 1/20, and with a *N multiplication we get 1 as a reward.
+        So this should go from 0 to 1. Now since I can very easily fuck this part up with the eyeballing, it could give us more reward than we want to (0 to 1).
+        One possible solution for this is to take the reward when we already have the food and are trying to get it to the base, and just multiply it by 2,
+        essentially giving it more rewards by default, once we've passed the first part and have acquired the food.
+        sorry for the mess <3
+        """
 
     # def how_forward_coefficient(left, right):
     #     return 1/(1/6 * np.abs(left - right) + 1) + 1
