@@ -270,7 +270,7 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
     #     reward += 3 # yippie
     #     print("PICKED UP")
 
-    if food_consumed == 0 and irs_after_movement[0,4] > 200 and np.sum(irs_after_movement[0, np.array([7,2,3,5])]) < 20: # when we are literally just getting food rn (runs into this only once... hopefully)
+    if food_consumed == 0 and irs_after_movement[0,4] > 200 and np.sum(irs_after_movement[0, np.array([7,5])]) < 20: # when we are literally just getting food rn (runs into this only once... hopefully)
         food_consumed = 1
         starting_base_food_distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([base_position.x, base_position.y]))
         reward += 3 # yippie
