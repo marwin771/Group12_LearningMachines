@@ -11,7 +11,7 @@ import math
 import cv2
 import datetime
 
-from typing import Literal
+from typing import Literal, Tuple
 
 from data_files import FIGRURES_DIR
 
@@ -101,7 +101,7 @@ class RobotNNController:
             with torch.no_grad():
                 return self.policy_net(state)
         else:
-            return torch.tensor([[random.uniform(-50, 100), random.uniform(-50, 100)]], device=device, dtype=torch.float64)
+            return torch.tensor([[random.uniform(0, 100), random.uniform(0, 100)]], device=device, dtype=torch.float64)
 
     def update_target(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
@@ -155,7 +155,7 @@ class RobotNNController:
         # torch.nn.utils.clip_grad_value_(self.policy_net.parameters(), 100)
         self.optimizer.step()
 
-def get_camera_image(rob: IRobobo) -> torch.Tensor:
+def get_camera_image(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
     image = rob.get_image_front()
     
     res = 192 # I'm too lazy to write a good split that equally splits for non-divisor numbers, so for the time being I need this to be divisible by 6
@@ -165,15 +165,40 @@ def get_camera_image(rob: IRobobo) -> torch.Tensor:
     # image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
-    mask = cv2.inRange(hsv, (36,25,25), (70,255,255))
+    mask_green = cv2.inRange(hsv, (36,25,25), (70,255,255))
+    mask_red1 = cv2.inRange(hsv, (0, 70, 50), (10, 255, 255))
+    mask_red2 = cv2.inRange(hsv, (170, 70, 50), (180, 255, 255))
 
-    image[mask > 0] = [1,1,1] # or [1,1,1] but then you can't view the result, so we'll take this extra step here
-    image[mask <= 0] = [0,0,0]
+    a = 255
+    masked_green = image.copy()
+    masked_green[mask_green > 0] = [a,a,a]
+    masked_green[mask_green <= 0] = [0, 0, 0]
+    
+    masked_red1 = image.copy()
+    masked_red1[mask_red1 > 0] = [a,a,a]
+    masked_red1[mask_red1 <= 0] = [0, 0, 0]
 
-    green_binary = image[:, :, 0]
-    green_binary = image[:, :, None]
+    masked_red2 = image.copy()
+    masked_red2[mask_red2 > 0] = [a,a,a]
+    masked_red2[mask_red2 <= 0] = [0, 0, 0]
 
-    return torch.tensor(green_binary, device=device, dtype=torch.float)
+    masked_red = masked_red1 + masked_red2
+    
+    # cv2.imwrite(FIGRURES_DIR / "test1.png", masked_green)
+    # cv2.imwrite(FIGRURES_DIR / "test2.png", masked_red)
+    # cv2.imwrite(FIGRURES_DIR / "test0.png", image)
+
+
+    # image[mask > 0] = [1,1,1] # or [1,1,1] but then you can't view the result, so we'll take this extra step here
+    # image[mask <= 0] = [0,0,0]
+
+    green_binary = masked_green[:, :, 0]
+    green_binary = masked_green[:, :, None]
+    
+    red_binary = masked_red[:, :, 0]
+    red_binary = masked_red[:, :, None]
+
+    return torch.tensor(green_binary, device=device, dtype=torch.float), torch.tensor(red_binary, device=device, dtype=torch.float) 
 
 def split_data(rows, cols, data): # please use something that is divisible by our dimensions (natural powers of two), otherwise it's gonna cut off the end
     data = np.array(data)  # Ensure data is a numpy array
@@ -203,10 +228,10 @@ def split_data(rows, cols, data): # please use something that is divisible by ou
 
     return np.array(buffer)
 
-def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_before_movement, image_before_movement, move_time):
+def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_before_movement, green_image_before_movement, red_image_before_movement, move_time, base_position):
 
     global food_consumed
-
+    global starting_base_food_distance
     # hypers
     collision_treshold = 150
     distance_between_wheels = 10 # cm    
@@ -219,7 +244,6 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
     turn_angle = angle_rad / 2
 
     irs_after_movement = irs_to_state(rob_after_movement)
-    # print(irs_after_movement)
     current_pos = rob_after_movement.get_position()
     wheels = rob_after_movement.read_wheels()
 
@@ -229,85 +253,49 @@ def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_be
     front = np.array([8,3,5,4,6])
     back = np.array([1,7,2])
 
+
     distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([starting_pos.x, starting_pos.y]))
 
-    one_by_two = split_data(1, 2, image_before_movement)
-    three_by_three = split_data(3, 3, image_before_movement)
+    one_by_two = split_data(1, 2, green_image_before_movement)
+    three_by_three = split_data(3, 3, green_image_before_movement)
+    two_by_three = split_data(2,3, red_image_before_movement) # CAREFUL.. THIS ONE IS RED!!
     res = 192
     all_pixels = res * res
 
     reward = 0
 
-    if food_consumed < rob_after_movement.nr_food_collected():
-        reward += 4500 * (rob_after_movement.nr_food_collected() - food_consumed) * (0 if left_speed < 0 and right_speed < 0 else 1)
-        food_consumed = rob_after_movement.nr_food_collected()
-    
+    # if rob_after_movement.nr_food_collected() - food_consumed > 0: # when we are literally just getting food rn (runs into this only once... hopefully)
+    #     food_consumed = rob_after_movement.nr_food_collected()
+    #     starting_base_food_distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([base_position.x, base_position.y]))
+    #     reward += 3 # yippie
+    #     print("PICKED UP")
 
-    def how_forward_coefficient(left, right):
-        return 1/(1/6 * np.abs(left - right) + 1) + 1
+    if food_consumed == 0 and irs_after_movement[0,4] > 200 and np.sum(irs_after_movement[0, np.array([7,2,3,5])]) < 20: # when we are literally just getting food rn (runs into this only once... hopefully)
+        food_consumed = 1
+        starting_base_food_distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([base_position.x, base_position.y]))
+        reward += 3 # yippie
+        print("PICKED UP")
+
+    
+    if not starting_base_food_distance == -1:
+        print(f"food processed: {food_consumed > 0}")
+        base_food_distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([base_position.x, base_position.y]))
+        base_food_progression = 1 - base_food_distance/starting_base_food_distance 
+
+    if food_consumed > 0: # supposedly we have the stuff in the thing
+        # print(base_food_progression)
+        reward += np.sqrt(5 * np.sum(three_by_three) / all_pixels) # 0 to 1 (sort of)
+        reward += base_food_progression #  1 if standing on it, 0 if the food is the same distance away as we started and negative if it's further away
+        reward += 1 if irs_after_movement[0,4] > 20 and sum(irs_after_movement[0, np.array([7,2,3,5])]) < 30 else 0
+        reward += 20 if rob_after_movement.base_detects_food() else 0 # woohooo
+    else:
+        reward += np.sqrt(20 * np.sum(two_by_three) / all_pixels)
+        reward += np.sqrt(8 * 3 * np.sum(two_by_three[:,1])/all_pixels) # np.sqrt(3 * 6 * np.sum(two_by_three[1,1])/all_pixels)
+        reward += 1 if irs_after_movement[0,4] > 20 and sum(irs_after_movement[0, np.array([7,2,3,5])]) < 30 else 0
+
+    # def how_forward_coefficient(left, right):
+    #     return 1/(1/6 * np.abs(left - right) + 1) + 1
         
-    
-    # if np.sum(three_by_three[:, 1]) / (all_pixels / 3) < 0.025: # if empty middle
-    #     if left_speed < 0 and right_speed > 0: # go left
-    #         reward += 500
-    #     else:
-    #         reward -= 200
-    # else: # green middle
-    #     if left_speed > 0 and right_speed > 0: # go forward
-    #         reward += 500 * how_forward_coefficient(left_speed, right_speed)
-    #     else:
-    #         reward -= 200
-    # if left_speed > 0 or right_speed > 0:
-    #     reward += 100
-    # else:
-    #     reward -= 200
-    # reward += np.sum(three_by_three)/res
-
-    if np.sum(three_by_three[:, 1]) / (all_pixels / 3) < 0.05: # if empty middle
-        reward -= 1000 if left_speed > 0 and right_speed > 0 else 0
-        if sum(irs_before_movement[0, front - 1]) > 3 * collision_treshold: # if facing the wall
-            reward += 1000 if right_speed > 0 and left_speed < 0 else 0 # reward left turn specifically
-            reward -= 200 if right_speed < 0 and left_speed > 0 else 0 # punish right turn specifically
-        else: # not facing a wall
-            reward += 0 if left_speed * right_speed < 0 else 500 # reward full turn
-            if np.sum(one_by_two[0, 0]) / (all_pixels / 2) > 0.01 or np.sum(one_by_two[0, 1]) / (all_pixels / 2) > 0.01: # if there is a specific side we can turn towards
-                reward += 500 if np.sum(one_by_two[0, 0]) > np.sum(one_by_two[0, 1]) and left_speed < right_speed else 0 # reward successful left turn
-                reward += 500 if np.sum(one_by_two[0, 0]) < np.sum(one_by_two[0, 1]) and left_speed > right_speed else 0 # reward successful right turn
-    else: # if green middle
-        reward += 0 if left_speed <= 0 or right_speed <= 0 else 500 * how_forward_coefficient(left_speed, right_speed) # reward forward motion
-    
-    # reward += np.sum(three_by_three)/res
-    # print(np.sum(three_by_three)/res)
-
-
-
-
-    # # here comes the ugly if tree because I'm not gonna go over the logic to optimise the amount of lines written at 3:23 AM. For more see: https://en.wikipedia.org/wiki/Gordian_Knot
-    # if right_speed > 0 and left_speed > 0: # going forward in any way
-    #     if np.sum(three_by_three[:, 1]) / (all_pixels / 3) > 0.05: # the middle column has considerable green
-    #         reward += 500 * how_forward_coefficient(left_speed, right_speed)
-    #     if np.sum(three_by_three[2, 1]) > 0 and left_speed > 50 and right_speed > 50: # the bottom middle has any green in it
-    #         reward += 500
-    # elif right_speed * left_speed <= 0 and np.sum(three_by_three[:, 1]) / (all_pixels / 3) < 0.05: # turning when there is nothing in front of us
-    #     reward += 300
-    #     if np.sum(one_by_two[0, 0]) / (all_pixels / 2) < 0.01 and np.sum(one_by_two[0, 1]) / (all_pixels / 2) < 0.01: # there is less than considerable green to both the left and the right
-    #         reward += 600 - sum(irs_after_movement[0, front - 1])
-    #     elif np.sum(one_by_two[0, 0]) > np.sum(one_by_two[0, 1]): # we have considerable green somewhere and more on the left
-    #         if left_speed < right_speed: # and we turn left
-    #             reward += 400
-    #         # else:
-    #         #     reward -= 200
-    #     else: # considerable green but more to the right
-    #         if right_speed < left_speed: # and we turn right
-    #             reward += 400
-    # elif right_speed < 0 and left_speed < 0: # going in reverse
-    #     if np.sum(three_by_three[:,:]) <= 10 and sum(irs_before_movement[0, front - 1]) > 3 * collision_treshold: # nothing green in front and we most likely hit something
-    #         reward += 700 * how_forward_coefficient(left_speed, right_speed)
-    #     else:
-    #         reward -= 200
-
-
-
     
     return torch.tensor([reward], device=device)
 
@@ -337,8 +325,12 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         rob.play_simulation()
         rob.sleep(0.5)
 
+        global starting_base_food_distance
+        starting_base_food_distance = -1
+        base_position = rob.base_position()
+
         state = irs_to_state(rob)
-        camera_state = get_camera_image(rob)
+        green_camera_state, red_camera_state = get_camera_image(rob)
         starting_pos = rob.get_position()
         total_reward = 0
 
@@ -354,19 +346,20 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
             rob.reset_wheels()
             rob.move_blocking(int(left_speed), int(right_speed), move_time) # execute movement
             next_state = irs_to_state(rob) # what we see after moving
-            next_camera_state = get_camera_image(rob)
+            next_green_camera_state, next_red_camera_state = get_camera_image(rob)
             wheels = rob.read_wheels()
 
             total_left += wheels.wheel_pos_l
             total_right += wheels.wheel_pos_r
             
             # reward gets rob (after moving), left_speed and right_speed (of the last movement),
-            reward = get_reward(rob, starting_pos, left_speed, right_speed, state, camera_state, move_time)
+            reward = get_reward(rob, starting_pos, left_speed, right_speed, state, green_camera_state, red_camera_state, move_time, base_position)
             total_reward += reward.item()
 
             controller.push(state, speeds, next_state, reward)
             state = next_state
-            camera_state = next_camera_state
+            green_camera_state = next_green_camera_state
+            red_camera_state = next_red_camera_state
 
             controller.optimize_model()
 
