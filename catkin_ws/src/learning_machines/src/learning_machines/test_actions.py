@@ -17,13 +17,17 @@ from data_files import FIGRURES_DIR
 
 from robobo_interface import (
         IRobobo,
-        SimulationRobobo
+        SimulationRobobo,
+        Position,
 )
 
 # Helper fns
 def irs_to_state(rob: IRobobo, clamp = 250) -> torch.Tensor:
     # Clamp the IR values to 150
-    return torch.tensor([list(map(lambda ir: ir if ir < clamp else clamp, rob.read_irs()))], device=device, dtype=torch.float)
+    return torch.tensor([irs_clamped(rob=rob, clamp=clamp)], device=device, dtype=torch.float)
+
+def irs_clamped(rob: IRobobo, clamp = 250):
+    return [ir if ir < clamp else clamp for ir in rob.read_irs()]
 
 def get_device_type() -> Literal['cuda', 'mps', 'cpu']: 
     if torch.cuda.is_available():
@@ -67,7 +71,8 @@ class WheelDQN(nn.Module):
     def forward(self, x):
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
-        return self.layer3(x)
+        x = self.layer3(x)
+        return torch.sigmoid(x) * 100
 
 
 class RobotNNController:
@@ -146,7 +151,7 @@ class RobotNNController:
 
         # Compute Huber loss
         criterion = nn.SmoothL1Loss()
-        loss = criterion(state_speed_values, expected_state_action_values.unsqueeze(1))
+        loss = criterion(state_speed_values, expected_state_action_values.unsqueeze(1).repeat(1, 2))
 
         # Optimize the model
         self.optimizer.zero_grad()
@@ -198,6 +203,11 @@ def get_camera_image(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
     red_binary = masked_red[:, :, 0]
     red_binary = masked_red[:, :, None]
 
+    return green_binary, red_binary
+
+
+def get_camera_image_as_tensor(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
+    green_binary, red_binary = get_camera_image(rob)
     return torch.tensor(green_binary, device=device, dtype=torch.float), torch.tensor(red_binary, device=device, dtype=torch.float) 
 
 def split_data(rows, cols, data): # please use something that is divisible by our dimensions (natural powers of two), otherwise it's gonna cut off the end
@@ -228,90 +238,50 @@ def split_data(rows, cols, data): # please use something that is divisible by ou
 
     return np.array(buffer)
 
-def get_reward(rob_after_movement, starting_pos, left_speed, right_speed, irs_before_movement, green_image_before_movement, red_image_before_movement, move_time, base_position):
 
+def calculate_percentage_of_white(img):
+    return np.sum(img == 255) / np.prod(img.shape)
+
+def is_stuck(starting_pos: Position, current_pos: Position, threshold = 3) -> bool:
+    if abs(starting_pos.x - current_pos.x) < threshold and abs(starting_pos.y - current_pos.y) < threshold:
+        return True
+    return False
+
+def get_distance(p1: Position, p2: Position) -> float:
+    return math.sqrt((p1.x - p2.x) ** 2 + (p1.y - p2.y) ** 2)
+
+def is_equal(p1: Position, p2: Position) -> bool:
+    return p1.x == p2.x and p1.y == p2.y
+
+def get_reward(rob: SimulationRobobo, starting_pos: Position, base_position: Position, previous_food_position: Position):
     global food_consumed
-    global starting_base_food_distance
-    # hypers
-    collision_treshold = 150
-    distance_between_wheels = 10 # cm    
 
-    # math (these are calculated when we're not going backwards, it might work for backwards movement but I'm too tired to think about it, so only use it with forward movement)
-    radius = 0 if left_speed == right_speed else ((left_speed + right_speed) * distance_between_wheels) / (2 * np.abs(left_speed - right_speed))
-    angular_velocity = np.abs(left_speed - right_speed) / (distance_between_wheels / 2) 
-    angle_rad = angular_velocity * move_time / 1000 # in seconds
-    turn = "left" if left_speed < right_speed else ("right" if right_speed < left_speed else "forward")
-    turn_angle = angle_rad / 2
+    # current_pos = rob.get_position()
+    current_food_pos = rob.food_position()
 
-    irs_after_movement = irs_to_state(rob_after_movement)
-    current_pos = rob_after_movement.get_position()
-    wheels = rob_after_movement.read_wheels()
-
-    left = wheels.wheel_pos_l
-    right = wheels.wheel_pos_r
-    
-    front = np.array([8,3,5,4,6])
-    back = np.array([1,7,2])
-
-
-    distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([starting_pos.x, starting_pos.y]))
-
-    one_by_two = split_data(1, 2, green_image_before_movement)
-    three_by_three = split_data(3, 3, green_image_before_movement)
-    two_by_three = split_data(2,3, red_image_before_movement) # CAREFUL.. THIS ONE IS RED!!
-    res = 192
-    all_pixels = res * res
-
+    green, red = get_camera_image(rob)
+    green_percentage = calculate_percentage_of_white(green)
+    red_percentage = calculate_percentage_of_white(red)
+    # print(f"Green: {green_percentage * 100}, Red: {red_percentage * 100}")
     reward = 0
 
-    # if rob_after_movement.nr_food_collected() - food_consumed > 0: # when we are literally just getting food rn (runs into this only once... hopefully)
-    #     food_consumed = rob_after_movement.nr_food_collected()
-    #     starting_base_food_distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([base_position.x, base_position.y]))
-    #     reward += 3 # yippie
-    #     print("PICKED UP")
 
-    if food_consumed == 0 and irs_after_movement[0,4] > 200 and np.sum(irs_after_movement[0, np.array([7,5])]) < 20: # when we are literally just getting food rn (runs into this only once... hopefully)
-        food_consumed = 1
-        starting_base_food_distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([base_position.x, base_position.y]))
-        reward += 3 # yippie
-        print("PICKED UP")
+    if rob.nr_food_collected() > 0 and not food_consumed:
+        print('Food collected')
+        food_consumed = True
+        reward += 0.5
+    elif rob.nr_food_collected() > 0 and not is_equal(current_food_pos, previous_food_position): # if we have food, we want to move towards the base
+        reward += 1 * green_percentage
+        reward += 0.5 * (get_distance(previous_food_position, base_position) - get_distance(current_food_pos, base_position))
+    else: # if we don't have food, we want to move towards the food
+        reward += 1 * red_percentage
 
-    
-    if not starting_base_food_distance == -1: # if we have a starting distance we can get down to defining things, supposedly if this happens food_consumed will always be > 0
-        print(f"food processed: {food_consumed > 0}")
-        base_food_distance = np.linalg.norm(np.array([current_pos.x, current_pos.y]) - np.array([base_position.x, base_position.y]))
-        base_food_progression = 1 - base_food_distance/starting_base_food_distance 
+    if rob.base_detects_food():
+        reward += 100
 
-    if food_consumed > 0: # supposedly we have the stuff in the thing
-        # print(base_food_progression)
-        reward += np.sqrt(5 * np.sum(three_by_three) / all_pixels) # 0 to 1 (sort of)
-        reward += base_food_progression #  1 if standing on it, 0 if the food is the same distance away as we started and negative if it's further away
-        reward += 1 if irs_after_movement[0,4] > 20 and sum(irs_after_movement[0, np.array([7,2,3,5])]) < 30 else 0
-        reward += 20 if rob_after_movement.base_detects_food() else 0 # woohooo
-    else:
-        reward += np.sqrt(20 * np.sum(two_by_three) / all_pixels)
-        reward += np.sqrt(8 * 3 * np.sum(two_by_three[:,1])/all_pixels) # np.sqrt(3 * 6 * np.sum(two_by_three[1,1])/all_pixels)
-        reward += 1 if irs_after_movement[0,4] > 20 and sum(irs_after_movement[0, np.array([7,2,3,5])]) < 30 else 0
-
-        """
-        explanation for the last else branch because this is the part that the robot can exploit for shitton of reward without ever picking anything up:
-
-        sqrt is there to make smaller numbers curve up https://www.desmos.com/calculator/tzm2ees4k3
-        The N * sum/all is supposed to be 0 if there are no sufficient pixels, and I eyeballed N to be a theoretical maximum divisor that the red part can occupy,
-        so if the N=20 I theorise that the food will occupy at best 1/20 of the screen, and when it does, sum/all will be 1/20, and with a *N multiplication we get 1 as a reward.
-        So this should go from 0 to 1. Now since I can very easily fuck this part up with the eyeballing, it could give us more reward than we want to (0 to 1).
-        One possible solution for this is to take the reward when we already have the food and are trying to get it to the base, and just multiply it by 2,
-        essentially giving it more rewards by default, once we've passed the first part and have acquired the food.
-        sorry for the mess <3
-        """
-
-    # def how_forward_coefficient(left, right):
-    #     return 1/(1/6 * np.abs(left - right) + 1) + 1
-        
-    
     return torch.tensor([reward], device=device)
 
-def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episodes = 30, load_previous=False, moves=20):
+def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episodes = 200, load_previous=False, moves=50):
     highest_reward = -float('inf')
     model_path = FIGRURES_DIR 
 
@@ -322,6 +292,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
     sensor_readings = []
     global rewards
     rewards = []
+    global food_consumed
 
     if load_previous and os.path.exists(model_path):
         controller.policy_net.load_state_dict(torch.load(model_path))
@@ -336,36 +307,41 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         # Start the simulation
         rob.play_simulation()
         rob.sleep(0.5)
+        rob.set_phone_tilt_blocking(109, 1000)
 
         global starting_base_food_distance
         starting_base_food_distance = -1
         base_position = rob.base_position()
 
         state = irs_to_state(rob)
-        green_camera_state, red_camera_state = get_camera_image(rob)
+        green_camera_state, red_camera_state = get_camera_image_as_tensor(rob)
         starting_pos = rob.get_position()
         total_reward = 0
 
         global food_consumed
-        food_consumed = 0
+        food_consumed = False
 
         for t in count():
             # state here is what we see before moving
             sensor_readings.append(rob.read_irs())
+
+            previous_position = rob.get_position()
+            previous_food_position = rob.food_position()
+
             speeds = controller.select_action(state)
             left_speed, right_speed = speeds[0, 0].item(), speeds[0, 1].item() # choose a movement
             move_time = 100
             rob.reset_wheels()
             rob.move_blocking(int(left_speed), int(right_speed), move_time) # execute movement
             next_state = irs_to_state(rob) # what we see after moving
-            next_green_camera_state, next_red_camera_state = get_camera_image(rob)
+            next_green_camera_state, next_red_camera_state = get_camera_image_as_tensor(rob)
             wheels = rob.read_wheels()
 
             total_left += wheels.wheel_pos_l
             total_right += wheels.wheel_pos_r
             
             # reward gets rob (after moving), left_speed and right_speed (of the last movement),
-            reward = get_reward(rob, starting_pos, left_speed, right_speed, state, green_camera_state, red_camera_state, move_time, base_position)
+            reward = get_reward(rob, previous_position, base_position, previous_food_position)
             total_reward += reward.item()
 
             controller.push(state, speeds, next_state, reward)
@@ -375,7 +351,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
 
             controller.optimize_model()
 
-            if t > moves + (episode // 5) * 5 :
+            if t > moves + (episode // 5) * 5 or rob.base_detects_food():
                 rob.stop_simulation()
                 break
         rewards.append(total_reward)
@@ -383,7 +359,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         print(f"Episode: {episode}, Total Reward: {total_reward}")
         if total_reward > highest_reward:
             highest_reward = total_reward
-            torch.save(controller.policy_net.state_dict(), model_path / f"{datetime.datetime.now()}")
+            torch.save(controller.policy_net.state_dict(), model_path / f"{datetime.datetime.now()}.model")
             print(f"Saved best model with highest reward: {highest_reward}")
 
 
@@ -478,7 +454,7 @@ def run_all_actions(rob):
     # rob.moveTiltTo(100, 100, True)
     # rob.sleep(5)
     # rob.startCamera()
-    run_training(rob, controller, num_episodes=30, load_previous=False, moves=40)
+    run_training(rob, controller, num_episodes=200, load_previous=False, moves=100)
     generate_plots()
 
 def run_task1_actions(rob):
