@@ -253,7 +253,7 @@ def get_distance(p1: Position, p2: Position) -> float:
 def is_equal(p1: Position, p2: Position) -> bool:
     return p1.x == p2.x and p1.y == p2.y
 
-def get_reward(rob: SimulationRobobo, starting_pos: Position, base_position: Position, previous_food_position: Position):
+def get_reward(rob: SimulationRobobo, starting_pos: Position, base_position: Position, previous_food_position: Position, move, moves_in_episode):
     global food_consumed
 
     # current_pos = rob.get_position()
@@ -277,7 +277,7 @@ def get_reward(rob: SimulationRobobo, starting_pos: Position, base_position: Pos
         reward += 1 * red_percentage
 
     if rob.base_detects_food():
-        reward += 100
+        reward += 100 * ((moves_in_episode - move) / moves_in_episode)
 
     return torch.tensor([reward], device=device)
 
@@ -320,6 +320,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
 
         global food_consumed
         food_consumed = False
+        moves_in_ep = moves + (episode // 5) * 5
 
         for t in count():
             # state here is what we see before moving
@@ -341,7 +342,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
             total_right += wheels.wheel_pos_r
             
             # reward gets rob (after moving), left_speed and right_speed (of the last movement),
-            reward = get_reward(rob, previous_position, base_position, previous_food_position)
+            reward = get_reward(rob, previous_position, base_position, previous_food_position, t, moves_in_ep)
             total_reward += reward.item()
 
             controller.push(state, speeds, next_state, reward)
@@ -351,7 +352,7 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
 
             controller.optimize_model()
 
-            if t > moves + (episode // 5) * 5 or rob.base_detects_food():
+            if t > moves_in_ep or rob.base_detects_food():
                 rob.stop_simulation()
                 break
         rewards.append(total_reward)
