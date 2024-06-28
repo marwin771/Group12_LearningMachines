@@ -24,7 +24,7 @@ from robobo_interface import (
 # Helper fns
 def irs_to_state(rob: IRobobo, clamp = 250) -> torch.Tensor:
     # Clamp the IR values to 150
-    return torch.tensor([irs_clamped(rob=rob, clamp=clamp)], device=device, dtype=torch.float)
+    return torch.tensor(irs_clamped(rob=rob, clamp=clamp), device=device, dtype=torch.float)
 
 def irs_clamped(rob: IRobobo, clamp = 250):
     return [ir if ir < clamp else clamp for ir in rob.read_irs()]
@@ -69,6 +69,7 @@ class WheelDQN(nn.Module):
     # Called with either one element to determine next action, or a batch
     # during optimization. Returns tensor([[left0exp,right0exp]...]).
     def forward(self, x):
+        # print(f'Input dim: {x.shape}')
         x = F.relu(self.layer1(x))
         x = F.relu(self.layer2(x))
         x = self.layer3(x)
@@ -106,12 +107,13 @@ class RobotNNController:
             with torch.no_grad():
                 return self.policy_net(state)
         else:
-            return torch.tensor([[random.uniform(0, 100), random.uniform(0, 100)]], device=device, dtype=torch.float64)
+            return torch.tensor([random.uniform(0, 100), random.uniform(0, 100)], device=device, dtype=torch.float64)
 
     def update_target(self):
         self.target_net.load_state_dict(self.policy_net.state_dict())
 
     def push(self, state, speeds, next_state, reward):
+        # print(f'State: {state.shape}, Speeds: {speeds.shape}, Next State: {next_state.shape}, Reward: {reward.shape}')
         self.memory.push(state, speeds, next_state, reward)
 
     def optimize_model(self):
@@ -123,36 +125,33 @@ class RobotNNController:
         # to Transition of batch-arrays.
         batch = Transition(*zip(*transitions))
 
+        transitions = self.memory.sample(self.batch_size)
+        batch = Transition(*zip(*transitions))
 
-        # Compute a mask of non-final states and concatenate the batch elements
-        # (a final state would've been the one after which simulation ended)
-        # non_final_mask = torch.tensor(tuple(map(lambda s: s is not None,
-        #                                     batch.next_state)), device=device, dtype=torch.bool)
-        # non_final_next_states = torch.cat([s for s in batch.next_state
-        #                                             if s is not None])
+        # Convert batch-array of Transitions to Transition of batch-arrays
+        state_batch = torch.stack(batch.state)
+        reward_batch = torch.stack(batch.reward)
+        next_state_batch = torch.stack(batch.next_state)
 
-        state_batch = torch.cat(batch.state)
-        reward_batch = torch.cat(batch.reward)
-        next_state_batch = torch.cat(batch.next_state)
-        
+        # Compute Q(s_t, a) - the model computes Q(s_t), then we select the columns of actions taken
         state_speed_values = self.policy_net(state_batch)
+        # print(f'State speed values: {state_speed_values.shape}')
 
         # Compute V(s_{t+1}) for all next states.
-        # Expected values of actions for non_final_next_states are computed based
-        # on the "older" target_net; selecting their best reward with max(1).values
-        # This is merged based on the mask, such that we'll have either the expected
-        # # state value or 0 in case the state was final.
-        # next_state_values = torch.zeros(self.batch_size, device=device)
-        # with torch.no_grad():
-        #     next_state_values[non_final_mask] = self.target_net(non_final_next_states).max(1).values
-        next_state_values = self.target_net(next_state_batch).max(1)[0].detach()
+        res: torch.Tensor =  self.target_net(next_state_batch)
+        max_prediction = res.max(1, keepdim=True)
+        next_state_values = max_prediction[0]
+        # print(f'Max prediction: {max_prediction}')
+        # print(f'Next state values: {next_state_values.shape}')
+
         # Compute the expected Q values
         expected_state_action_values = (next_state_values * self.gamma) + reward_batch
 
         # Compute Huber loss
-        criterion = nn.SmoothL1Loss()
-        loss = criterion(state_speed_values, expected_state_action_values.unsqueeze(1).repeat(1, 2))
-
+        # print(f'Expected state action values: {expected_state_action_values.repeat(1, 2).shape}')
+        # print(f'Expected state action values: {expected_state_action_values.unsqueeze(1).shape}')
+        loss = F.smooth_l1_loss(state_speed_values, expected_state_action_values.repeat(1, 2))
+        
         # Optimize the model
         self.optimizer.zero_grad()
         loss.backward()
@@ -198,10 +197,7 @@ def get_camera_image(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
     # image[mask <= 0] = [0,0,0]
 
     green_binary = masked_green[:, :, 0]
-    green_binary = masked_green[:, :, None]
-    
     red_binary = masked_red[:, :, 0]
-    red_binary = masked_red[:, :, None]
 
     return green_binary, red_binary
 
@@ -281,7 +277,9 @@ def get_reward(rob: SimulationRobobo, starting_pos: Position, base_position: Pos
 
     return torch.tensor([reward], device=device)
 
-def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episodes = 200, load_previous=False, moves=50):
+
+
+def run_training(rob1: SimulationRobobo, rob2: SimulationRobobo, controller: RobotNNController, num_episodes = 200, load_previous=False, moves=50, swap_chance = 0.1):
     highest_reward = -float('inf')
     model_path = FIGRURES_DIR 
 
@@ -294,6 +292,8 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
     rewards = []
     global food_consumed
 
+    rob = rob1
+
     if load_previous and os.path.exists(model_path):
         controller.policy_net.load_state_dict(torch.load(model_path))
         controller.target_net.load_state_dict(controller.policy_net.state_dict())
@@ -301,6 +301,11 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
 
     for episode in range(num_episodes):
         # iterations_since_last_collision = 1
+        if random.random() <= swap_chance:
+            if rob._api_port == rob1._api_port:
+                rob = rob2
+            else:
+                rob = rob1
 
         print(f'Started Episode: {episode}')
         
@@ -314,8 +319,13 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
         base_position = rob.base_position()
 
         state = irs_to_state(rob)
+
         green_camera_state, red_camera_state = get_camera_image_as_tensor(rob)
         starting_pos = rob.get_position()
+
+        state = torch.cat((state.view(-1), green_camera_state.view(-1), red_camera_state.view(-1)))
+        # print(f'Starting state dim: {state.shape}')
+
         total_reward = 0
 
         global food_consumed
@@ -330,12 +340,14 @@ def run_training(rob: SimulationRobobo, controller: RobotNNController, num_episo
             previous_food_position = rob.food_position()
 
             speeds = controller.select_action(state)
-            left_speed, right_speed = speeds[0, 0].item(), speeds[0, 1].item() # choose a movement
+            left_speed, right_speed = speeds[0].item(), speeds[1].item() # choose a movement
             move_time = 100
             rob.reset_wheels()
             rob.move_blocking(int(left_speed), int(right_speed), move_time) # execute movement
             next_state = irs_to_state(rob) # what we see after moving
             next_green_camera_state, next_red_camera_state = get_camera_image_as_tensor(rob)
+            next_state = torch.cat((next_state.view(-1), next_green_camera_state.view(-1), next_red_camera_state.view(-1)))
+            # print(f'Next state dim: {next_state.shape}')
             wheels = rob.read_wheels()
 
             total_left += wheels.wheel_pos_l
@@ -369,9 +381,9 @@ def clamp(n, smallest, largest):
         return max(n, smallest)
     return min(n, largest)
 
-def run_model(rob: IRobobo, controller: RobotNNController):
+def run_model(rob: IRobobo, controller: RobotNNController, model_name: str = 'top_hardware.model'):
     # load the model
-    model_path = FIGRURES_DIR  / 'top_hardware.model'
+    model_path = FIGRURES_DIR  / model_name
     controller.policy_net.load_state_dict(torch.load(model_path))
     controller.target_net.load_state_dict(controller.policy_net.state_dict())
     controller.policy_net.eval()
@@ -379,6 +391,9 @@ def run_model(rob: IRobobo, controller: RobotNNController):
     # Start the simulation
     if isinstance(rob, SimulationRobobo):
         rob.play_simulation()
+
+    rob.set_phone_tilt_blocking(100, 100)
+    rob.sleep(0.5)
 
     state = irs_to_state(rob)
     
@@ -416,7 +431,8 @@ def run_model(rob: IRobobo, controller: RobotNNController):
 
 # Initialize the agent and run the simulation
 # n_observations = 8 IR sensors
-controller = RobotNNController(n_observations=8, memory_capacity=10000, batch_size=64, gamma=0.99, lr=1e-3)
+# TODO CHANGE BATCH SIZE TO 64
+controller = RobotNNController(n_observations=(8 + 2 * 192 * 192), memory_capacity=10000, batch_size=2, gamma=0.99, lr=1e-3)
 
 def generate_plots():
     global sensor_readings
@@ -451,15 +467,21 @@ def generate_plots():
     ax.set_title("Rewards Over Time")
     plt.savefig(FIGRURES_DIR / 'rewards_training.png')
 
-def run_all_actions(rob):
+def run_all_actions():
     # rob.moveTiltTo(100, 100, True)
     # rob.sleep(5)
     # rob.startCamera()
-    run_training(rob, controller, num_episodes=200, load_previous=False, moves=100)
+    rob1 = SimulationRobobo()
+    # rob2 = SimulationRobobo(api_port=23001)
+    rob2 = None
+    run_training(rob1, rob2, controller, num_episodes=80, load_previous=False, moves=100, swap_chance=-1.0)
     generate_plots()
 
-def run_task1_actions(rob):
-    run_model(rob, controller)
+def run_task1_actions(rob, model_name = None):
+    if model_name is None:
+        run_model(rob, controller)
+    else:
+        run_model(rob, controller, model_name)
 
 def run_task0_actions(rob):
     print('Task 0 actions')

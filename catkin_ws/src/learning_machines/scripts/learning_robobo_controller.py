@@ -23,8 +23,11 @@ if __name__ == "__main__":
     print(sys.argv[2])
 
     if len(sys.argv) >= 3 and sys.argv[2] == "--train":
-        run_all_actions(rob)
+        run_all_actions()
     elif len(sys.argv) >= 3 and sys.argv[2] == "--test":
-        run_task1_actions(rob)
+        if len(sys.argv) >= 4:
+            run_task1_actions(rob, sys.argv[3])
+        else:
+            run_task1_actions(rob)
 
     # run_all_actions(rob)

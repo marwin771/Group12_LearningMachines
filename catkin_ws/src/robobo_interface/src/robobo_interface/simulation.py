@@ -67,6 +67,7 @@ class SimulationRobobo(IRobobo):
         self._logger = logger
         self._used_pids: LockedSet[int] = LockedSet()
         self._identifier = f"[{identifier}]"
+        self._api_port = api_port
 
         if api_port is None:
             api_port = int(os.getenv("COPPELIA_SIM_PORT", "23000"))
