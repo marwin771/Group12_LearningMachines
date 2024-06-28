@@ -21,6 +21,8 @@ from robobo_interface import (
         Position,
 )
 
+RESOLUTION = 64
+
 # Helper fns
 def irs_to_state(rob: IRobobo, clamp = 250) -> torch.Tensor:
     # Clamp the IR values to 150
@@ -162,10 +164,10 @@ class RobotNNController:
 def get_camera_image(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
     image = rob.get_image_front()
     
-    res = 192 # I'm too lazy to write a good split that equally splits for non-divisor numbers, so for the time being I need this to be divisible by 6
+    # res = 192 # I'm too lazy to write a good split that equally splits for non-divisor numbers, so for the time being I need this to be divisible by 6
     # res = 96
 
-    image = cv2.resize(image, (res, res))
+    image = cv2.resize(image, (RESOLUTION, RESOLUTION))
     # image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -173,7 +175,7 @@ def get_camera_image(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
     mask_red1 = cv2.inRange(hsv, (0, 70, 50), (10, 255, 255))
     mask_red2 = cv2.inRange(hsv, (170, 70, 50), (180, 255, 255))
 
-    a = 255
+    a = 1
     masked_green = image.copy()
     masked_green[mask_green > 0] = [a,a,a]
     masked_green[mask_green <= 0] = [0, 0, 0]
@@ -236,7 +238,7 @@ def split_data(rows, cols, data): # please use something that is divisible by ou
 
 
 def calculate_percentage_of_white(img):
-    return np.sum(img == 255) / np.prod(img.shape)
+    return np.sum(img == 1) / np.prod(img.shape)
 
 def is_stuck(starting_pos: Position, current_pos: Position, threshold = 3) -> bool:
     if abs(starting_pos.x - current_pos.x) < threshold and abs(starting_pos.y - current_pos.y) < threshold:
@@ -431,8 +433,7 @@ def run_model(rob: IRobobo, controller: RobotNNController, model_name: str = 'to
 
 # Initialize the agent and run the simulation
 # n_observations = 8 IR sensors
-# TODO CHANGE BATCH SIZE TO 64
-controller = RobotNNController(n_observations=(8 + 2 * 192 * 192), memory_capacity=10000, batch_size=2, gamma=0.99, lr=1e-3)
+controller = RobotNNController(n_observations=(8 + 2 * RESOLUTION * RESOLUTION), memory_capacity=10000, batch_size=2, gamma=0.99, lr=1e-3)
 
 def generate_plots():
     global sensor_readings
