@@ -21,8 +21,6 @@ from robobo_interface import (
         Position,
 )
 
-RESOLUTION = 64
-
 # Helper fns
 def irs_to_state(rob: IRobobo, clamp = 250) -> torch.Tensor:
     # Clamp the IR values to 150
@@ -164,10 +162,10 @@ class RobotNNController:
 def get_camera_image(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
     image = rob.get_image_front()
     
-    # res = 192 # I'm too lazy to write a good split that equally splits for non-divisor numbers, so for the time being I need this to be divisible by 6
+    res = 192 # I'm too lazy to write a good split that equally splits for non-divisor numbers, so for the time being I need this to be divisible by 6
     # res = 96
 
-    image = cv2.resize(image, (RESOLUTION, RESOLUTION))
+    image = cv2.resize(image, (res, res))
     # image_gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
     hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
@@ -201,8 +199,17 @@ def get_camera_image(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
     green_binary = masked_green[:, :, 0]
     red_binary = masked_red[:, :, 0]
 
-    return green_binary, red_binary
+    green_split = split_data(3, 3, green_binary)
+    red_split = split_data(3, 3, red_binary)
 
+    green_3x3 = np.zeros((3, 3), dtype=int)
+    red_3x3 = np.zeros((3, 3), dtype=int)
+    for i in range(3):
+        for k in range(3):
+            green_3x3[i, k] = 1 if np.sum(green_split[i,k]) > 0 else 0
+            red_3x3[i, k] = 1 if np.sum(red_split[i,k]) > 0 else 0
+            
+    return green_3x3, red_3x3
 
 def get_camera_image_as_tensor(rob: IRobobo) -> Tuple[torch.Tensor, torch.Tensor]:
     green_binary, red_binary = get_camera_image(rob)
@@ -302,8 +309,8 @@ def run_training(rob1: SimulationRobobo, rob2: SimulationRobobo, controller: Rob
         print("Loaded saved model.")
 
     for episode in range(num_episodes):
-        # iterations_since_last_collision = 1
         if random.random() <= swap_chance:
+            print('Swapping robots')
             if rob._api_port == rob1._api_port:
                 rob = rob2
             else:
@@ -433,7 +440,7 @@ def run_model(rob: IRobobo, controller: RobotNNController, model_name: str = 'to
 
 # Initialize the agent and run the simulation
 # n_observations = 8 IR sensors
-controller = RobotNNController(n_observations=(8 + 2 * RESOLUTION * RESOLUTION), memory_capacity=10000, batch_size=64, gamma=0.99, lr=1e-2)
+controller = RobotNNController(n_observations=(8 + 2 * 3 * 3), memory_capacity=10000, batch_size=64, gamma=0.99, lr=1e-3)
 
 def generate_plots():
     global sensor_readings
@@ -473,9 +480,10 @@ def run_all_actions():
     # rob.sleep(5)
     # rob.startCamera()
     rob1 = SimulationRobobo()
-    rob2 = SimulationRobobo(api_port=23001)
+    # rob2 = SimulationRobobo(api_port=23001)
+    rob2 = None
     # rob2 = None
-    run_training(rob1, rob2, controller, num_episodes=500, load_previous=False, moves=150, swap_chance=0.2)
+    run_training(rob1, rob2, controller, num_episodes=150, load_previous=False, moves=150, swap_chance=-1)
     generate_plots()
 
 def run_task1_actions(rob, model_name = None):
