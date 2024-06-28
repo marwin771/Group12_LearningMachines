@@ -97,8 +97,8 @@ class RobotNNController:
         self.target_net.eval()
         
         self.epsilon_start = 0.9
-        self.epsilon_end = 0.05
-        self.epsilon_decay = 1000 
+        self.epsilon_end = 0.1
+        self.epsilon_decay = 30000
 
 
     def select_action(self, state: torch.Tensor) -> torch.Tensor:
@@ -433,7 +433,7 @@ def run_model(rob: IRobobo, controller: RobotNNController, model_name: str = 'to
 
 # Initialize the agent and run the simulation
 # n_observations = 8 IR sensors
-controller = RobotNNController(n_observations=(8 + 2 * RESOLUTION * RESOLUTION), memory_capacity=10000, batch_size=2, gamma=0.99, lr=1e-3)
+controller = RobotNNController(n_observations=(8 + 2 * RESOLUTION * RESOLUTION), memory_capacity=10000, batch_size=64, gamma=0.99, lr=1e-2)
 
 def generate_plots():
     global sensor_readings
@@ -473,9 +473,9 @@ def run_all_actions():
     # rob.sleep(5)
     # rob.startCamera()
     rob1 = SimulationRobobo()
-    # rob2 = SimulationRobobo(api_port=23001)
-    rob2 = None
-    run_training(rob1, rob2, controller, num_episodes=80, load_previous=False, moves=100, swap_chance=-1.0)
+    rob2 = SimulationRobobo(api_port=23001)
+    # rob2 = None
+    run_training(rob1, rob2, controller, num_episodes=500, load_previous=False, moves=150, swap_chance=0.2)
     generate_plots()
 
 def run_task1_actions(rob, model_name = None):
